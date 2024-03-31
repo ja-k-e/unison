@@ -1,3 +1,5 @@
+import * as waveTables from "./waveTables.js";
+
 const ALL_FREQUENCIES = [
   16.352, 17.324, 18.354, 19.445, 20.602, 21.827, 23.125, 24.5, 25.957, 27.5,
   29.135, 30.868, 32.703, 34.648, 36.708, 38.891, 41.203, 43.654, 46.249,
@@ -26,23 +28,47 @@ export class Unison {
   async initialize() {
     this.audioContext = new AudioContext();
     this.analyser = this.audioContext.createAnalyser();
+    const audio = document.querySelector("audio");
+    audio.onplay = () => this.audioContext.resume();
+    this.source = this.audioContext.createMediaElementSource(audio);
+
     this.analyser.fftSize = SIZE;
     this.analyser.smoothingTimeConstant = 0;
     this.binCount = this.analyser.frequencyBinCount;
     this.binSize = this.audioContext.sampleRate / this.binCount;
     this.dataArray = new Uint8Array(this.binCount);
-    this.stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-    this.source = this.audioContext.createMediaStreamSource(this.stream);
+    // this.stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    // this.source = this.audioContext.createMediaStreamSource(this.stream);
     this.source.connect(this.analyser);
+    const gain = this.audioContext.createGain();
+    gain.gain.setValueAtTime(0.1, this.audioContext.currentTime);
+    // delay node to sync audio with output of oscillators
+    const delay = this.audioContext.createDelay();
+    delay.delayTime.setValueAtTime(0.15, this.audioContext.currentTime);
+    this.source.connect(gain);
+    gain.connect(delay);
+    delay.connect(this.audioContext.destination);
     this.initializeChromaticMaps();
     this.initializeOscillators();
     this.draw();
   }
 
+  generateOscillator(waveSettings) {
+    const oscillator = this.audioContext.createOscillator();
+    oscillator.type = "square";
+    // oscillator.setPeriodicWave(
+    //   this.audioContext.createPeriodicWave(
+    //     Float32Array.from(waveSettings.real),
+    //     Float32Array.from(waveSettings.imag)
+    //   )
+    // );
+
+    return oscillator;
+  }
+
   initializeOscillators() {
-    this.oscillators = FREQUENCIES.map((f) => {
-      const oscillator = this.audioContext.createOscillator();
-      oscillator.type = "triangle";
+    this.oscillators = FREQUENCIES.map((f, i) => {
+      const oscillator = this.generateOscillator(waveTables.celeste);
       oscillator.frequency.setValueAtTime(f, this.audioContext.currentTime);
       const gain = this.audioContext.createGain();
       gain.gain.setValueAtTime(0, this.audioContext.currentTime);
@@ -73,7 +99,7 @@ export class Unison {
     const { width, height } = this.canvas;
     this.analyser.getByteFrequencyData(this.dataArray);
     this.context.clearRect(0, 0, width, height);
-    this.context.fillStyle = "rgb(255, 255, 255)";
+    this.context.fillStyle = "rgb(0, 0, 0)";
     this.context.fillRect(0, 0, width, height);
 
     const count = FREQUENCIES.length;
@@ -81,10 +107,13 @@ export class Unison {
     let barHeight;
     let x = 0;
 
+    const max = Math.max(...this.dataArray, 100);
+
     for (let i = 0; i < count; i++) {
       const freq = FREQUENCIES[i];
       const gain = this.oscillators[i];
       const index = this.frequencyToChromaticIndex[freq];
+      const val = this.dataArray[index];
       const indexA =
         i > 0 ? this.frequencyToChromaticIndex[FREQUENCIES[i - 1]] : 0;
       const indexZ =
@@ -93,13 +122,15 @@ export class Unison {
           : count - 1;
       const valA = this.dataArray[indexA];
       const valZ = this.dataArray[indexZ];
-      const val = this.dataArray[index];
       const rel = val >= valA && val >= valZ ? val : 0;
-      const ratio = Math.pow(rel / 256, 6);
+      // const rel = val;
+      const ratio = Math.pow(rel / max, 12);
       gain.gain.setValueAtTime(ratio * 0.2, this.audioContext.currentTime);
-      barHeight = ratio * height;
-      this.context.fillStyle = `rgba(0, 0, 0, ${ratio * 0.5 + 0.5})`;
-      this.context.fillRect(x, height - barHeight, barWidth, barHeight);
+      barHeight = ratio * height * 0.8;
+      this.context.fillStyle = `rgba(0, 0, 0, ${ratio})`;
+      this.context.fillStyle = `lch(96 123 60 / ${ratio})`;
+      const y = height * 0.5 - barHeight * 0.5;
+      this.context.fillRect(x, y, barWidth, barHeight);
       x += barWidth;
     }
   }

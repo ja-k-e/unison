@@ -12,9 +12,20 @@
       body {
         margin: 0;
       }
+      audio {
+        bottom: 2rem;
+        left: 50%;
+        opacity: 0.2;
+        position: fixed;
+        transform: translateX(-50%);
+        &:hover {
+          opacity: 1;
+        }
+      }
     </style>
   </head>
   <body>
+    <audio src="song2.m4a" controls></audio>
     <script src="index.js" type="module"></script>
   </body>
 </html>
