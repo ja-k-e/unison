@@ -15,14 +15,34 @@ const ALL_FREQUENCIES = [
   4434.92, 4698.63, 4978.03, 5274.04, 5587.65, 5919.91, 6271.93, 6644.88, 7040,
   7458.62, 7902.13,
 ];
-const FREQUENCIES = ALL_FREQUENCIES.splice(24, 72);
+// const FREQUENCIES = ALL_FREQUENCIES.splice(24, 72);
+const FREQUENCIES = [...ALL_FREQUENCIES];
 const SIZE = 32768;
+const SMOOTHING = 0;
+const AUDIO_DELAY = 0.15;
+const AUDIO_VOLUME = 0.0;
+const POWER = 16;
+const ATTACK = 0.8;
+// frames of cooldown
+const ATTACK_COOLDOWN = 50;
 
 export class Unison {
   constructor() {
     this.canvas = document.createElement("canvas");
     this.context = this.canvas.getContext("2d");
     document.body.appendChild(this.canvas);
+    const $power = document.getElementById("power");
+    const $attack = document.getElementById("attack");
+    this.power = $power.value = POWER;
+    this.attack = $attack.value = ATTACK;
+    $power.addEventListener(
+      "input",
+      ({ target }) => (this.power = parseFloat(target.value))
+    );
+    $attack.addEventListener(
+      "input",
+      ({ target }) => (this.attack = parseFloat(target.value))
+    );
   }
 
   async initialize() {
@@ -30,21 +50,22 @@ export class Unison {
     this.analyser = this.audioContext.createAnalyser();
     const audio = document.querySelector("audio");
     audio.onplay = () => this.audioContext.resume();
+
     this.source = this.audioContext.createMediaElementSource(audio);
+    // this.stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    // this.source = this.audioContext.createMediaStreamSource(this.stream);
 
     this.analyser.fftSize = SIZE;
-    this.analyser.smoothingTimeConstant = 0;
+    this.analyser.smoothingTimeConstant = SMOOTHING;
     this.binCount = this.analyser.frequencyBinCount;
     this.binSize = this.audioContext.sampleRate / this.binCount;
     this.dataArray = new Uint8Array(this.binCount);
-    // this.stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-    // this.source = this.audioContext.createMediaStreamSource(this.stream);
     this.source.connect(this.analyser);
     const gain = this.audioContext.createGain();
-    gain.gain.setValueAtTime(0.1, this.audioContext.currentTime);
+    gain.gain.setValueAtTime(AUDIO_VOLUME, this.audioContext.currentTime);
     // delay node to sync audio with output of oscillators
     const delay = this.audioContext.createDelay();
-    delay.delayTime.setValueAtTime(0.15, this.audioContext.currentTime);
+    delay.delayTime.setValueAtTime(AUDIO_DELAY, this.audioContext.currentTime);
     this.source.connect(gain);
     gain.connect(delay);
     delay.connect(this.audioContext.destination);
@@ -53,17 +74,39 @@ export class Unison {
     this.draw();
   }
 
-  generateOscillator(waveSettings) {
-    const oscillator = this.audioContext.createOscillator();
-    oscillator.type = "square";
-    // oscillator.setPeriodicWave(
-    //   this.audioContext.createPeriodicWave(
-    //     Float32Array.from(waveSettings.real),
-    //     Float32Array.from(waveSettings.imag)
-    //   )
-    // );
+  attackFrequency(frequency) {
+    if (this.history[frequency].attack) {
+      return;
+    }
+    const oscillator = this.generateOscillator();
+    oscillator.frequency.setValueAtTime(
+      frequency,
+      this.audioContext.currentTime
+    );
+    const gain = this.audioContext.createGain();
+    oscillator.connect(gain);
+    gain.connect(this.audioContext.destination);
+    oscillator.start();
+    gain.gain.setValueAtTime(0, this.audioContext.currentTime);
+    gain.gain.linearRampToValueAtTime(
+      0.1,
+      this.audioContext.currentTime + 0.01
+    );
+    gain.gain.linearRampToValueAtTime(0, this.audioContext.currentTime + 0.5);
+    this.history[frequency].attack = { oscillator, gain };
+  }
 
-    return oscillator;
+  releaseFrequency(frequency) {
+    if (!this.history[frequency].attack) {
+      return;
+    }
+    const stopTime = this.audioContext.currentTime + 0.5;
+    this.history[frequency].attack.oscillator.stop(stopTime);
+    this.history[frequency].attack.gain.gain.linearRampToValueAtTime(
+      0,
+      stopTime
+    );
+    delete this.history[frequency].attack;
   }
 
   initializeOscillators() {
@@ -80,9 +123,16 @@ export class Unison {
   }
 
   initializeChromaticMaps() {
+    this.history = {};
     this.frequencyToChromaticIndex = {};
     this.chromaticIndexToFrequencies = {};
     this.chromaticIndices = FREQUENCIES.map((f, i) => {
+      this.history[f] = {
+        attackOscillator: 0,
+        confidence: 0,
+        previousValue: 0,
+        maxValue: 0,
+      };
       const chromaticIndex = Math.floor(f / this.binSize);
       this.frequencyToChromaticIndex[f] = chromaticIndex;
       this.chromaticIndexToFrequencies[chromaticIndex] =
@@ -90,6 +140,21 @@ export class Unison {
       this.chromaticIndexToFrequencies[chromaticIndex].push(f);
       return chromaticIndex;
     });
+  }
+
+  generateOscillator(waveSettings) {
+    const oscillator = this.audioContext.createOscillator();
+    if (waveSettings) {
+      oscillator.setPeriodicWave(
+        this.audioContext.createPeriodicWave(
+          Float32Array.from(waveSettings.real),
+          Float32Array.from(waveSettings.imag)
+        )
+      );
+    } else {
+      oscillator.type = "square";
+    }
+    return oscillator;
   }
 
   draw() {
@@ -107,28 +172,67 @@ export class Unison {
     let barHeight;
     let x = 0;
 
-    const max = Math.max(...this.dataArray, 100);
+    const maxValue = Math.max(...this.dataArray, 1);
 
     for (let i = 0; i < count; i++) {
-      const freq = FREQUENCIES[i];
+      const frequency = FREQUENCIES[i];
+      const { previousValue } = this.history[frequency];
       const gain = this.oscillators[i];
-      const index = this.frequencyToChromaticIndex[freq];
-      const val = this.dataArray[index];
+      const index = this.frequencyToChromaticIndex[frequency];
+      const value = this.dataArray[index];
       const indexA =
         i > 0 ? this.frequencyToChromaticIndex[FREQUENCIES[i - 1]] : 0;
       const indexZ =
         i < count - 1
           ? this.frequencyToChromaticIndex[FREQUENCIES[i + 1]]
           : count - 1;
-      const valA = this.dataArray[indexA];
-      const valZ = this.dataArray[indexZ];
-      const rel = val >= valA && val >= valZ ? val : 0;
-      // const rel = val;
-      const ratio = Math.pow(rel / max, 12);
-      gain.gain.setValueAtTime(ratio * 0.2, this.audioContext.currentTime);
-      barHeight = ratio * height * 0.8;
-      this.context.fillStyle = `rgba(0, 0, 0, ${ratio})`;
-      this.context.fillStyle = `lch(96 123 60 / ${ratio})`;
+      const valueA = this.dataArray[indexA];
+      const valueZ = this.dataArray[indexZ];
+      const areaVolume = value + valueA + valueZ;
+      const areaProminence = areaVolume ? value / (areaVolume / 3) : 0;
+      const relativeValue = Math.min(
+        value,
+        value * areaProminence * 0.25 + value * 0.75
+      );
+      const safeRatio = maxValue ? relativeValue / maxValue : 0;
+      const adjustedRatio = Math.pow(safeRatio, this.power);
+      this.history[frequency].previousValue = value;
+      if (value > previousValue) {
+        this.history[frequency].confidence += adjustedRatio;
+        this.history[frequency].maxValue = Math.max(
+          this.history[frequency].maxValue,
+          value
+        );
+      } else {
+        this.history[frequency].confidence *= 0.99;
+      }
+      // if ratio above attack threshold, attack, otherwise release
+      if (adjustedRatio > this.attack) {
+        if (!this.history[frequency].attack) {
+          this.attackFrequency(frequency);
+        }
+      } else if (this.history[frequency].attack) {
+        this.releaseFrequency(frequency);
+      }
+      gain.gain.setValueAtTime(
+        adjustedRatio * 0.1,
+        this.audioContext.currentTime
+      );
+      barHeight = adjustedRatio * height * 0.8;
+      const hue = Math.round(((i % 12) / 12) * 360);
+      const floored = Math.floor(this.history[frequency].confidence);
+      if (floored) {
+        this.context.fillStyle = "white";
+        this.context.font = "12px sans-serif";
+        this.context.textAlign = "center";
+        this.context.fillText(
+          floored,
+          x + barWidth * 0.5,
+          height * 0.5 - 6,
+          barWidth
+        );
+      }
+      this.context.fillStyle = `lch(96 133 ${hue} / ${adjustedRatio})`;
       const y = height * 0.5 - barHeight * 0.5;
       this.context.fillRect(x, y, barWidth, barHeight);
       x += barWidth;
