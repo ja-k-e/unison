@@ -15,6 +15,7 @@ const ALL_FREQUENCIES = [
   4434.92, 4698.63, 4978.03, 5274.04, 5587.65, 5919.91, 6271.93, 6644.88, 7040,
   7458.62, 7902.13,
 ];
+const NOTES = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"];
 // const FREQUENCIES = ALL_FREQUENCIES.splice(24, 72);
 const FREQUENCIES = [...ALL_FREQUENCIES];
 const SIZE = 32768;
@@ -23,26 +24,39 @@ const AUDIO_DELAY = 0.15;
 const AUDIO_VOLUME = 0.0;
 const POWER = 16;
 const ATTACK = 0.8;
-// frames of cooldown
-const ATTACK_COOLDOWN = 50;
+const FILTER_MIN = 0;
+const FILTER_MAX = FREQUENCIES.length;
+const CONFIDENCE_THRESHOLD = 5;
 
 export class Unison {
   constructor() {
     this.canvas = document.createElement("canvas");
     this.context = this.canvas.getContext("2d");
     document.body.appendChild(this.canvas);
-    const $power = document.getElementById("power");
-    const $attack = document.getElementById("attack");
-    this.power = $power.value = POWER;
-    this.attack = $attack.value = ATTACK;
-    $power.addEventListener(
-      "input",
-      ({ target }) => (this.power = parseFloat(target.value))
-    );
-    $attack.addEventListener(
-      "input",
-      ({ target }) => (this.attack = parseFloat(target.value))
-    );
+    const $factorPower = document.getElementById("factor-power");
+    const $factorAttack = document.getElementById("factor-attack");
+    const $filterMin = document.getElementById("filter-min");
+    const $filterMax = document.getElementById("filter-max");
+    $filterMin.setAttribute("max", FILTER_MAX);
+    $filterMax.setAttribute("max", FILTER_MAX);
+    this.factorPower = $factorPower.value = POWER;
+    this.factorAttack = $factorAttack.value = ATTACK;
+    this.filterMin = $filterMin.value = FILTER_MIN;
+    this.filterMax = $filterMax.value = FILTER_MAX;
+    $factorPower.addEventListener("input", ({ target }) => {
+      this.factorPower = parseFloat(target.value);
+    });
+    $factorAttack.addEventListener("input", ({ target }) => {
+      this.factorAttack = parseFloat(target.value);
+    });
+    $filterMin.addEventListener("input", ({ target }) => {
+      this.filterMin = parseFloat(target.value);
+      this.onFilterChange();
+    });
+    $filterMax.addEventListener("input", ({ target }) => {
+      this.filterMax = parseFloat(target.value);
+      this.onFilterChange();
+    });
   }
 
   async initialize() {
@@ -89,7 +103,7 @@ export class Unison {
     oscillator.start();
     gain.gain.setValueAtTime(0, this.audioContext.currentTime);
     gain.gain.linearRampToValueAtTime(
-      0.1,
+      0.05,
       this.audioContext.currentTime + 0.01
     );
     gain.gain.linearRampToValueAtTime(0, this.audioContext.currentTime + 0.5);
@@ -167,14 +181,19 @@ export class Unison {
     this.context.fillStyle = "rgb(0, 0, 0)";
     this.context.fillRect(0, 0, width, height);
 
-    const count = FREQUENCIES.length;
+    const count = Math.abs(this.filterMax - this.filterMin);
     const barWidth = width / count;
     let barHeight;
     let x = 0;
 
     const maxValue = Math.max(...this.dataArray, 1);
 
-    for (let i = 0; i < count; i++) {
+    const starting = Math.min(this.filterMin, this.filterMax);
+    const ending = Math.max(this.filterMin, this.filterMax);
+
+    this.top = [];
+
+    for (let i = starting; i < ending; i++) {
       const frequency = FREQUENCIES[i];
       const { previousValue } = this.history[frequency];
       const gain = this.oscillators[i];
@@ -195,7 +214,7 @@ export class Unison {
         value * areaProminence * 0.25 + value * 0.75
       );
       const safeRatio = maxValue ? relativeValue / maxValue : 0;
-      const adjustedRatio = Math.pow(safeRatio, this.power);
+      const adjustedRatio = Math.pow(safeRatio, this.factorPower);
       this.history[frequency].previousValue = value;
       if (value > previousValue) {
         this.history[frequency].confidence += adjustedRatio;
@@ -206,8 +225,11 @@ export class Unison {
       } else {
         this.history[frequency].confidence *= 0.99;
       }
+      if (this.history[frequency].confidence > CONFIDENCE_THRESHOLD) {
+        this.top.push(frequency);
+      }
       // if ratio above attack threshold, attack, otherwise release
-      if (adjustedRatio > this.attack) {
+      if (adjustedRatio > this.factorAttack) {
         if (!this.history[frequency].attack) {
           this.attackFrequency(frequency);
         }
@@ -236,6 +258,36 @@ export class Unison {
       const y = height * 0.5 - barHeight * 0.5;
       this.context.fillRect(x, y, barWidth, barHeight);
       x += barWidth;
+    }
+
+    const topNotes = this.top.map((a) => {
+      const index = FREQUENCIES.indexOf(a);
+      return `${NOTES[index % 12]}${Math.floor(index / 12)}`;
+    });
+    this.context.fillStyle = "white";
+    this.context.font = "24px sans-serif";
+    this.context.textAlign = "center";
+    this.context.fillText(topNotes.join(", "), width * 0.5, 30);
+  }
+
+  onFilterChange() {
+    const min = Math.min(this.filterMin, this.filterMax);
+    const max = Math.max(this.filterMin, this.filterMax);
+
+    const muteFrequency = (index) => {
+      const frequency = FREQUENCIES[index];
+      if (this.history[frequency].attack) {
+        this.releaseFrequency(frequency);
+      }
+      const gain = this.oscillators[index];
+      gain.gain.setValueAtTime(0, this.audioContext.currentTime);
+    };
+
+    for (let i = 0; i < min; i++) {
+      muteFrequency(i);
+    }
+    for (let i = max; i < FREQUENCIES.length; i++) {
+      muteFrequency(i);
     }
   }
 }
